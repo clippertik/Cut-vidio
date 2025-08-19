@@ -1,4 +1,4 @@
-name: YouTube Multi Cut (custom res/fps/bitrate)
+name: YouTube Multi Cut Pro
 
 on:
   workflow_dispatch:
@@ -6,27 +6,25 @@ on:
       url:
         description: "🎬 URL YouTube"
         required: true
-      segment1:
-        description: "✂️ Segmen 1 (format: 00:05:25-00:05:50)"
+      segments:
+        description: "✂️ Daftar segmen (format: 00:05:25-00:05:50,00:10:00-00:10:30,...)"
         required: true
-      segment2:
-        description: "✂️ Segmen 2 (opsional)"
-        required: false
-      segment3:
-        description: "✂️ Segmen 3 (opsional)"
-        required: false
       resolution:
-        description: "📺 Resolusi maksimal (contoh: 720, 1080, 1440, 2160)"
+        description: "📺 Resolusi maksimal (720,1080,1440,2160)"
         required: true
         default: "1080"
       fps:
-        description: "🎞️ FPS (pilihan: 30, 60, 120)"
+        description: "🎞️ FPS (30/60/120)"
         required: true
         default: "30"
       bitrate:
-        description: "💾 Bitrate video (isi 'auto' atau contoh: 2M, 4M, 8M)"
+        description: "💾 Bitrate video (auto atau misal: 2M, 4M, 8M)"
         required: true
         default: "auto"
+      mode:
+        description: "📂 Output mode: pisah (per segmen) atau gabung (satu file)"
+        required: true
+        default: "pisah"
 
 jobs:
   cut:
@@ -41,52 +39,63 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y ffmpeg
 
+      - name: Buat file cookies dari Secret
+        run: |
+          echo "${{ secrets.YT_COOKIES }}" > cookies.txt
+
       - name: Potong video sesuai segmen + encode ulang
         run: |
           URL="${{ github.event.inputs.url }}"
-          SEG1="${{ github.event.inputs.segment1 }}"
-          SEG2="${{ github.event.inputs.segment2 }}"
-          SEG3="${{ github.event.inputs.segment3 }}"
+          SEGMENTS="${{ github.event.inputs.segments }}"
           RES="${{ github.event.inputs.resolution }}"
           FPS="${{ github.event.inputs.fps }}"
           BITRATE="${{ github.event.inputs.bitrate }}"
+          MODE="${{ github.event.inputs.mode }}"
 
           i=1
-          for SEG in "$SEG1" "$SEG2" "$SEG3"; do
-            if [ ! -z "$SEG" ]; then
-              echo "🎬 Download segmen $SEG ..."
-              yt-dlp --download-sections "*$SEG" \
-                -f "bestvideo[height<=${RES}]+bestaudio/best" \
-                -o "raw_${i}.%(ext)s" \
-                "$URL"
+          mkdir outputs
 
-              RAWFILE=$(ls raw_${i}.* | head -n 1)
+          # Split input jadi array segmen (pisah koma)
+          IFS=',' read -ra SEGARR <<< "$SEGMENTS"
+          for SEG in "${SEGARR[@]}"; do
+            echo "🎬 Download segmen $SEG ..."
+            yt-dlp --cookies cookies.txt --download-sections "*$SEG" \
+              -f "bestvideo[height<=${RES}]+bestaudio/best" \
+              -o "raw_${i}.%(ext)s" \
+              "$URL"
 
-              if [ "$BITRATE" = "auto" ]; then
-                echo "⚙️ Encode ulang (auto bitrate, CRF 23, ${FPS} fps, ${RES}p)..."
-                ffmpeg -i "$RAWFILE" \
-                  -c:v libx264 -preset fast -crf 23 \
-                  -vf "fps=${FPS},scale=-2:${RES}" \
-                  -c:a aac -b:a 192k \
-                  -movflags +faststart \
-                  "segment_${i}.mp4"
-              else
-                echo "⚙️ Encode ulang (manual bitrate ${BITRATE}, ${FPS} fps, ${RES}p)..."
-                ffmpeg -i "$RAWFILE" \
-                  -c:v libx264 -preset fast -b:v ${BITRATE} \
-                  -vf "fps=${FPS},scale=-2:${RES}" \
-                  -c:a aac -b:a 192k \
-                  -movflags +faststart \
-                  "segment_${i}.mp4"
-              fi
+            RAWFILE=$(ls raw_${i}.* | head -n 1)
 
-              rm "$RAWFILE"
-              ((i++))
+            if [ "$BITRATE" = "auto" ]; then
+              ffmpeg -i "$RAWFILE" \
+                -c:v libx264 -preset fast -crf 23 \
+                -vf "fps=${FPS},scale=-2:${RES}" \
+                -c:a aac -b:a 192k \
+                -movflags +faststart \
+                "outputs/segment_${i}.mp4"
+            else
+              ffmpeg -i "$RAWFILE" \
+                -c:v libx264 -preset fast -b:v ${BITRATE} \
+                -vf "fps=${FPS},scale=-2:${RES}" \
+                -c:a aac -b:a 192k \
+                -movflags +faststart \
+                "outputs/segment_${i}.mp4"
             fi
+
+            rm "$RAWFILE"
+            ((i++))
           done
+
+          if [ "$MODE" = "gabung" ]; then
+            echo "📂 Gabung semua segmen..."
+            for f in outputs/segment_*.mp4; do
+              echo "file '$f'" >> file_list.txt
+            done
+            ffmpeg -f concat -safe 0 -i file_list.txt -c copy outputs/final.mp4
+          fi
 
       - name: Upload hasil
         uses: actions/upload-artifact@v4
         with:
           name: youtube-segments
-          path: segment_*.mp4
+          path: outputs/*
