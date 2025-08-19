@@ -1,104 +1,92 @@
-name: YouTube Multi-Cut (format singkat)
+name: YouTube Multi Cut (custom res/fps/bitrate)
 
 on:
   workflow_dispatch:
     inputs:
       url:
-        description: "🎬 Masukkan URL YouTube"
+        description: "🎬 URL YouTube"
         required: true
-      seg1:
-        description: "⏱️ Segment 1 (format: 00:01:00-00:01:30)"
+      segment1:
+        description: "✂️ Segmen 1 (format: 00:05:25-00:05:50)"
         required: true
-      seg2:
-        description: "⏱️ Segment 2 (opsional, format sama)"
+      segment2:
+        description: "✂️ Segmen 2 (opsional)"
         required: false
-      seg3:
-        description: "⏱️ Segment 3 (opsional, format sama)"
+      segment3:
+        description: "✂️ Segmen 3 (opsional)"
         required: false
       resolution:
-        description: "Resolusi maksimal"
+        description: "📺 Resolusi maksimal (contoh: 720, 1080, 1440, 2160)"
         required: true
-        type: choice
-        options: ["720", "1080", "1440", "2160"]
         default: "1080"
       fps:
-        description: "FPS target"
+        description: "🎞️ FPS (pilihan: 30, 60, 120)"
         required: true
-        type: choice
-        options: ["original", "24", "30", "60", "120"]
-        default: "original"
+        default: "30"
       bitrate:
-        description: "Bitrate video"
+        description: "💾 Bitrate video (isi 'auto' atau contoh: 2M, 4M, 8M)"
         required: true
-        type: choice
-        options: ["auto", "5M", "10M", "20M"]
         default: "auto"
 
 jobs:
   cut:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repository
+      - name: Checkout repo
         uses: actions/checkout@v3
 
-      - name: Install tools
+      - name: Install yt-dlp & ffmpeg
         run: |
-          sudo apt update
-          sudo apt install -y ffmpeg
-          pip install yt-dlp
+          pip install -U yt-dlp
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
 
-      - name: Buat file cookies dari Secret
+      - name: Potong video sesuai segmen + encode ulang
         run: |
-          echo "${{ secrets.YT_COOKIES }}" > cookies.txt
+          URL="${{ github.event.inputs.url }}"
+          SEG1="${{ github.event.inputs.segment1 }}"
+          SEG2="${{ github.event.inputs.segment2 }}"
+          SEG3="${{ github.event.inputs.segment3 }}"
+          RES="${{ github.event.inputs.resolution }}"
+          FPS="${{ github.event.inputs.fps }}"
+          BITRATE="${{ github.event.inputs.bitrate }}"
 
-      - name: Download video asli
-        run: |
-          yt-dlp --cookies cookies.txt \
-            -f "bestvideo[height<=${{ github.event.inputs.resolution }}]+bestaudio/best[height<=${{ github.event.inputs.resolution }}]" \
-            -o "source.%(ext)s" \
-            "${{ github.event.inputs.url }}"
+          i=1
+          for SEG in "$SEG1" "$SEG2" "$SEG3"; do
+            if [ ! -z "$SEG" ]; then
+              echo "🎬 Download segmen $SEG ..."
+              yt-dlp --download-sections "*$SEG" \
+                -f "bestvideo[height<=${RES}]+bestaudio/best" \
+                -o "raw_${i}.%(ext)s" \
+                "$URL"
 
-      - name: Potong video jadi beberapa segmen
-        run: |
-          # Fungsi bantu untuk split segmen "start-end"
-          cut_segment () {
-            local range="$1"
-            local outfile="$2"
-            local start="${range%-*}"
-            local end="${range#*-}"
+              RAWFILE=$(ls raw_${i}.* | head -n 1)
 
-            # Tentukan argumen FPS
-            if [ "${{ github.event.inputs.fps }}" = "original" ]; then
-              FPS_ARG=""
-            else
-              FPS_ARG="-r ${{ github.event.inputs.fps }}"
+              if [ "$BITRATE" = "auto" ]; then
+                echo "⚙️ Encode ulang (auto bitrate, CRF 23, ${FPS} fps, ${RES}p)..."
+                ffmpeg -i "$RAWFILE" \
+                  -c:v libx264 -preset fast -crf 23 \
+                  -vf "fps=${FPS},scale=-2:${RES}" \
+                  -c:a aac -b:a 192k \
+                  -movflags +faststart \
+                  "segment_${i}.mp4"
+              else
+                echo "⚙️ Encode ulang (manual bitrate ${BITRATE}, ${FPS} fps, ${RES}p)..."
+                ffmpeg -i "$RAWFILE" \
+                  -c:v libx264 -preset fast -b:v ${BITRATE} \
+                  -vf "fps=${FPS},scale=-2:${RES}" \
+                  -c:a aac -b:a 192k \
+                  -movflags +faststart \
+                  "segment_${i}.mp4"
+              fi
+
+              rm "$RAWFILE"
+              ((i++))
             fi
-
-            # Tentukan argumen bitrate
-            if [ "${{ github.event.inputs.bitrate }}" = "auto" ]; then
-              BITRATE_ARG=""
-            else
-              BITRATE_ARG="-b:v ${{ github.event.inputs.bitrate }}"
-            fi
-
-            ffmpeg -i source.* -ss "$start" -to "$end" \
-              -c:v libx264 -preset fast -crf 23 $FPS_ARG $BITRATE_ARG \
-              -c:a aac -b:a 192k -movflags +faststart \
-              "$outfile"
-          }
-
-          cut_segment "${{ github.event.inputs.seg1 }}" clip1.mp4
-
-          if [ -n "${{ github.event.inputs.seg2 }}" ]; then
-            cut_segment "${{ github.event.inputs.seg2 }}" clip2.mp4
-          fi
-
-          if [ -n "${{ github.event.inputs.seg3 }}" ]; then
-            cut_segment "${{ github.event.inputs.seg3 }}" clip3.mp4
-          fi
+          done
 
       - name: Upload hasil
         uses: actions/upload-artifact@v4
         with:
-          name: youtube-multi-cut
-          path: clip*.mp4
+          name: youtube-segments
+          path: segment_*.mp4
