@@ -1,4 +1,4 @@
-name: YouTube Multi-Cut (segmen terpisah)
+name: YouTube Multi-Cut (format singkat)
 
 on:
   workflow_dispatch:
@@ -6,23 +6,14 @@ on:
       url:
         description: "🎬 Masukkan URL YouTube"
         required: true
-      seg1_start:
-        description: "⏱️ Segment 1 - Waktu mulai (misal 00:01:00)"
+      seg1:
+        description: "⏱️ Segment 1 (format: 00:01:00-00:01:30)"
         required: true
-      seg1_end:
-        description: "⏱️ Segment 1 - Waktu selesai (misal 00:01:30)"
-        required: true
-      seg2_start:
-        description: "⏱️ Segment 2 - Waktu mulai (opsional)"
+      seg2:
+        description: "⏱️ Segment 2 (opsional, format sama)"
         required: false
-      seg2_end:
-        description: "⏱️ Segment 2 - Waktu selesai (opsional)"
-        required: false
-      seg3_start:
-        description: "⏱️ Segment 3 - Waktu mulai (opsional)"
-        required: false
-      seg3_end:
-        description: "⏱️ Segment 3 - Waktu selesai (opsional)"
+      seg3:
+        description: "⏱️ Segment 3 (opsional, format sama)"
         required: false
       resolution:
         description: "Resolusi maksimal"
@@ -69,40 +60,41 @@ jobs:
 
       - name: Potong video jadi beberapa segmen
         run: |
-          # Tentukan argumen FPS
-          if [ "${{ github.event.inputs.fps }}" = "original" ]; then
-            FPS_ARG=""
-          else
-            FPS_ARG="-r ${{ github.event.inputs.fps }}"
-          fi
+          # Fungsi bantu untuk split segmen "start-end"
+          cut_segment () {
+            local range="$1"
+            local outfile="$2"
+            local start="${range%-*}"
+            local end="${range#*-}"
 
-          # Tentukan argumen bitrate
-          if [ "${{ github.event.inputs.bitrate }}" = "auto" ]; then
-            BITRATE_ARG=""
-          else
-            BITRATE_ARG="-b:v ${{ github.event.inputs.bitrate }}"
-          fi
+            # Tentukan argumen FPS
+            if [ "${{ github.event.inputs.fps }}" = "original" ]; then
+              FPS_ARG=""
+            else
+              FPS_ARG="-r ${{ github.event.inputs.fps }}"
+            fi
 
-          # Segment 1
-          ffmpeg -i source.* -ss "${{ github.event.inputs.seg1_start }}" -to "${{ github.event.inputs.seg1_end }}" \
-            -c:v libx264 -preset fast -crf 23 $FPS_ARG $BITRATE_ARG \
-            -c:a aac -b:a 192k -movflags +faststart \
-            clip1.mp4
+            # Tentukan argumen bitrate
+            if [ "${{ github.event.inputs.bitrate }}" = "auto" ]; then
+              BITRATE_ARG=""
+            else
+              BITRATE_ARG="-b:v ${{ github.event.inputs.bitrate }}"
+            fi
 
-          # Segment 2 (jika diisi)
-          if [ -n "${{ github.event.inputs.seg2_start }}" ] && [ -n "${{ github.event.inputs.seg2_end }}" ]; then
-            ffmpeg -i source.* -ss "${{ github.event.inputs.seg2_start }}" -to "${{ github.event.inputs.seg2_end }}" \
+            ffmpeg -i source.* -ss "$start" -to "$end" \
               -c:v libx264 -preset fast -crf 23 $FPS_ARG $BITRATE_ARG \
               -c:a aac -b:a 192k -movflags +faststart \
-              clip2.mp4
+              "$outfile"
+          }
+
+          cut_segment "${{ github.event.inputs.seg1 }}" clip1.mp4
+
+          if [ -n "${{ github.event.inputs.seg2 }}" ]; then
+            cut_segment "${{ github.event.inputs.seg2 }}" clip2.mp4
           fi
 
-          # Segment 3 (jika diisi)
-          if [ -n "${{ github.event.inputs.seg3_start }}" ] && [ -n "${{ github.event.inputs.seg3_end }}" ]; then
-            ffmpeg -i source.* -ss "${{ github.event.inputs.seg3_start }}" -to "${{ github.event.inputs.seg3_end }}" \
-              -c:v libx264 -preset fast -crf 23 $FPS_ARG $BITRATE_ARG \
-              -c:a aac -b:a 192k -movflags +faststart \
-              clip3.mp4
+          if [ -n "${{ github.event.inputs.seg3 }}" ]; then
+            cut_segment "${{ github.event.inputs.seg3 }}" clip3.mp4
           fi
 
       - name: Upload hasil
