@@ -1,17 +1,47 @@
-name: YouTube Cut (dengan cookies dari Secret)
+name: YouTube Multi-Cut (segmen terpisah)
 
 on:
   workflow_dispatch:
     inputs:
       url:
-        description: "URL YouTube"
+        description: "🎬 Masukkan URL YouTube"
         required: true
-      start:
-        description: "Waktu mulai (misal: 00:01:23)"
+      seg1_start:
+        description: "⏱️ Segment 1 - Waktu mulai (misal 00:01:00)"
         required: true
-      end:
-        description: "Waktu selesai (misal: 00:02:34)"
+      seg1_end:
+        description: "⏱️ Segment 1 - Waktu selesai (misal 00:01:30)"
         required: true
+      seg2_start:
+        description: "⏱️ Segment 2 - Waktu mulai (opsional)"
+        required: false
+      seg2_end:
+        description: "⏱️ Segment 2 - Waktu selesai (opsional)"
+        required: false
+      seg3_start:
+        description: "⏱️ Segment 3 - Waktu mulai (opsional)"
+        required: false
+      seg3_end:
+        description: "⏱️ Segment 3 - Waktu selesai (opsional)"
+        required: false
+      resolution:
+        description: "Resolusi maksimal"
+        required: true
+        type: choice
+        options: ["720", "1080", "1440", "2160"]
+        default: "1080"
+      fps:
+        description: "FPS target"
+        required: true
+        type: choice
+        options: ["original", "24", "30", "60", "120"]
+        default: "original"
+      bitrate:
+        description: "Bitrate video"
+        required: true
+        type: choice
+        options: ["auto", "5M", "10M", "20M"]
+        default: "auto"
 
 jobs:
   cut:
@@ -29,26 +59,54 @@ jobs:
       - name: Buat file cookies dari Secret
         run: |
           echo "${{ secrets.YT_COOKIES }}" > cookies.txt
-          ls -l cookies.txt
 
-      - name: Download & Cut langsung (pakai yt-dlp)
+      - name: Download video asli
         run: |
           yt-dlp --cookies cookies.txt \
-            --download-sections "*${{ github.event.inputs.start }}-${{ github.event.inputs.end }}" \
-            -f "bestvideo+bestaudio/best" \
-            -o "output.%(ext)s" \
+            -f "bestvideo[height<=${{ github.event.inputs.resolution }}]+bestaudio/best[height<=${{ github.event.inputs.resolution }}]" \
+            -o "source.%(ext)s" \
             "${{ github.event.inputs.url }}"
 
-      - name: Encode ulang biar CapCut friendly
+      - name: Potong video jadi beberapa segmen
         run: |
-          ffmpeg -i output.* \
-            -c:v libx264 -preset fast -crf 23 \
-            -c:a aac -b:a 192k \
-            -movflags +faststart \
-            final.mp4
+          # Tentukan argumen FPS
+          if [ "${{ github.event.inputs.fps }}" = "original" ]; then
+            FPS_ARG=""
+          else
+            FPS_ARG="-r ${{ github.event.inputs.fps }}"
+          fi
 
-      - name: Upload hasil sebagai artifact
+          # Tentukan argumen bitrate
+          if [ "${{ github.event.inputs.bitrate }}" = "auto" ]; then
+            BITRATE_ARG=""
+          else
+            BITRATE_ARG="-b:v ${{ github.event.inputs.bitrate }}"
+          fi
+
+          # Segment 1
+          ffmpeg -i source.* -ss "${{ github.event.inputs.seg1_start }}" -to "${{ github.event.inputs.seg1_end }}" \
+            -c:v libx264 -preset fast -crf 23 $FPS_ARG $BITRATE_ARG \
+            -c:a aac -b:a 192k -movflags +faststart \
+            clip1.mp4
+
+          # Segment 2 (jika diisi)
+          if [ -n "${{ github.event.inputs.seg2_start }}" ] && [ -n "${{ github.event.inputs.seg2_end }}" ]; then
+            ffmpeg -i source.* -ss "${{ github.event.inputs.seg2_start }}" -to "${{ github.event.inputs.seg2_end }}" \
+              -c:v libx264 -preset fast -crf 23 $FPS_ARG $BITRATE_ARG \
+              -c:a aac -b:a 192k -movflags +faststart \
+              clip2.mp4
+          fi
+
+          # Segment 3 (jika diisi)
+          if [ -n "${{ github.event.inputs.seg3_start }}" ] && [ -n "${{ github.event.inputs.seg3_end }}" ]; then
+            ffmpeg -i source.* -ss "${{ github.event.inputs.seg3_start }}" -to "${{ github.event.inputs.seg3_end }}" \
+              -c:v libx264 -preset fast -crf 23 $FPS_ARG $BITRATE_ARG \
+              -c:a aac -b:a 192k -movflags +faststart \
+              clip3.mp4
+          fi
+
+      - name: Upload hasil
         uses: actions/upload-artifact@v4
         with:
-          name: youtube-cut
-          path: final.mp4
+          name: youtube-multi-cut
+          path: clip*.mp4
