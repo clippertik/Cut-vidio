@@ -1,4 +1,4 @@
-name: YouTube Multi-Cut (Manual/Gemini, Auto Clean)
+name: YouTube Multi-Cut (Gemini + Cookies)
 
 on:
   workflow_dispatch:
@@ -6,19 +6,9 @@ on:
       url:
         description: "URL YouTube"
         required: true
-      segments:
-        description: |
-          Daftar waktu mulai-selesai (pisahkan baris baru). Kosongkan jika pakai Gemini.
-          Contoh:
-          00:01:00-00:01:30
-          00:05:00-00:06:00
-        required: false
       gemini_api:
-        description: "API Key Gemini (1 jam)"
-        required: false
-      gemini_trigger:
-        description: "Prompt ke Gemini (biar cari momen otomatis)"
-        required: false
+        description: "API Key Gemini (berlaku 1 jam)"
+        required: true
       resolution:
         description: "Resolusi maksimal"
         required: true
@@ -37,98 +27,78 @@ on:
         type: choice
         options: [ "auto", "5M", "10M", "20M" ]
         default: "auto"
-      merge_clips:
-        description: "Gabungkan semua clip jadi 1 file?"
-        required: true
-        type: choice
-        options: [ "yes", "no" ]
-        default: "no"
 
 jobs:
   cut:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repository
+      - name: Checkout repo
         uses: actions/checkout@v3
-
-      - name: Bersihkan file lama (auto clean)
-        run: |
-          rm -f clip*.mp4 final.mp4 source.* segments.json
 
       - name: Install tools
         run: |
           sudo apt update
-          sudo apt install -y ffmpeg jq curl
+          sudo apt install -y ffmpeg jq
           pip install yt-dlp
 
-      - name: Buat file cookies dari Secret
-        run: |
-          echo "${{ secrets.YT_COOKIES }}" > cookies.txt
+      - name: Buat cookies dari Secret
+        run: echo "${{ secrets.YT_COOKIES }}" > cookies.txt
 
-      - name: Download video asli
+      - name: Download video
         run: |
           yt-dlp --cookies cookies.txt \
             -f "bestvideo[height<=${{ github.event.inputs.resolution }}]+bestaudio/best[height<=${{ github.event.inputs.resolution }}]" \
             -o "source.%(ext)s" \
             "${{ github.event.inputs.url }}"
 
-      - name: Cari segmen via Gemini (opsional)
-        if: ${{ github.event.inputs.gemini_api != '' && github.event.inputs.gemini_trigger != '' }}
+      - name: Cari segmen otomatis via Gemini
         run: |
+          PROMPT="Anda adalah clipper. Temukan 10 momen donate lucu, marah, seru, senang, nasehat, memberikan ilmu yang berpotensi viral di media sosial. Berikan detail waktu mulai dan akhir, judul, serta alasannya untuk waktu minimal 15 detik dan maksimal 1 menit. Format output JSON: [{\"start\":\"00:01:00\",\"end\":\"00:01:30\",\"title\":\"judul_momen\"}, ...]"
+
           RESP=$(curl -s -X POST "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key=${{ github.event.inputs.gemini_api }}" \
             -H "Content-Type: application/json" \
-            -d '{
-              "contents":[{"parts":[{"text":"${{ github.event.inputs.gemini_trigger }}"}]}]
-            }')
+            -d "{
+              \"contents\":[{\"parts\":[{\"text\":\"$PROMPT\"}]}]
+            }")
+
           echo "$RESP" | jq -r '..|.text? // empty' > segments.json
-          echo "=== Segmen dari Gemini ==="
+          echo "=== Segmen Gemini ==="
           cat segments.json
 
-      - name: Multiple Cut pakai ffmpeg
+      - name: Multiple Cut dengan ffmpeg
         run: |
-          # Tentukan argumen FPS
           if [ "${{ github.event.inputs.fps }}" = "original" ]; then
             FPS_ARG=""
           else
             FPS_ARG="-r ${{ github.event.inputs.fps }}"
           fi
 
-          # Tentukan argumen bitrate
           if [ "${{ github.event.inputs.bitrate }}" = "auto" ]; then
             BITRATE_ARG=""
           else
             BITRATE_ARG="-b:v ${{ github.event.inputs.bitrate }}"
           fi
 
-          # Tentukan daftar segmen: manual atau Gemini
-          if [ -s segments.json ]; then
-            SEGMENTS=$(cat segments.json)
-          else
-            SEGMENTS="${{ github.event.inputs.segments }}"
-          fi
-
           i=1
-          echo "$SEGMENTS" | while read SEG; do
-            [ -z "$SEG" ] && continue
-            START=$(echo $SEG | cut -d'-' -f1)
-            END=$(echo $SEG | cut -d'-' -f2)
+          jq -c '.[]' segments.json | while read row; do
+            START=$(echo $row | jq -r '.start')
+            END=$(echo $row | jq -r '.end')
+            TITLE=$(echo $row | jq -r '.title' | tr ' ' '_' | tr -cd '[:alnum:]_-')
+            FILENAME=$(printf "%02d_%s.mp4" $i "$TITLE")
+
             ffmpeg -i source.* -ss $START -to $END \
               -c:v libx264 -preset fast -crf 23 $FPS_ARG $BITRATE_ARG \
               -c:a aac -b:a 192k -movflags +faststart \
-              clip${i}.mp4
+              "$FILENAME"
+
             i=$((i+1))
           done
-
-      - name: Gabungkan semua clip (opsional)
-        if: ${{ github.event.inputs.merge_clips == 'yes' }}
-        run: |
-          for f in clip*.mp4; do echo "file '$PWD/$f'" >> clips.txt; done
-          ffmpeg -f concat -safe 0 -i clips.txt -c copy final.mp4
 
       - name: Upload hasil
         uses: actions/upload-artifact@v4
         with:
           name: youtube-multi-cut
-          path: |
-            clip*.mp4
-            final.mp4
+          path: "*.mp4"
+
+      - name: Bersihkan file lama
+        run: rm -f source.* clip*.mp4 segments.json
