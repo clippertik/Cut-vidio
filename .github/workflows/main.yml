@@ -1,4 +1,4 @@
-name: YouTube Multi-Cut (Manual Segments)
+name: YouTube Multi-Cut (HH:MM:SS)
 
 on:
   workflow_dispatch:
@@ -26,12 +26,11 @@ on:
         default: "auto"
       segments:
         description: |
-          Segmen waktu dalam format JSON.  
+          Daftar segmen (pakai format HH:MM:SS-HH:MM:SS).  
           Contoh:  
-          [
-            {"start":"00:01:00","end":"00:01:30","title":"momen_lucu"},
-            {"start":"00:05:10","end":"00:05:40","title":"marah"}
-          ]
+          00:01:00-00:01:30  
+          02:05:10-02:06:00  
+          02:30:00-02:31:15
         required: true
 
 jobs:
@@ -44,7 +43,7 @@ jobs:
       - name: Install tools
         run: |
           sudo apt update
-          sudo apt install -y ffmpeg jq
+          sudo apt install -y ffmpeg
           pip install yt-dlp
 
       - name: Buat cookies dari Secret
@@ -59,8 +58,6 @@ jobs:
 
       - name: Potong video sesuai segmen
         run: |
-          echo '${{ github.event.inputs.segments }}' | jq '.' > segments.json
-
           if [ "${{ github.event.inputs.fps }}" = "original" ]; then
             FPS_ARG=""
           else
@@ -74,11 +71,10 @@ jobs:
           fi
 
           i=1
-          jq -c '.[]' segments.json | while read row; do
-            START=$(echo $row | jq -r '.start')
-            END=$(echo $row | jq -r '.end')
-            TITLE=$(echo $row | jq -r '.title' | tr ' ' '_' | tr -cd '[:alnum:]_-')
-            FILENAME=$(printf "%02d_%s.mp4" $i "$TITLE")
+          echo "${{ github.event.inputs.segments }}" | while IFS=- read START END; do
+            START=$(echo $START | xargs)
+            END=$(echo $END | xargs)
+            FILENAME=$(printf "%02d_clip.mp4" $i)
 
             ffmpeg -i source.* -ss $START -to $END \
               -c:v libx264 -preset fast -crf 23 $FPS_ARG $BITRATE_ARG \
@@ -95,4 +91,4 @@ jobs:
           path: "*.mp4"
 
       - name: Bersihkan file lama
-        run: rm -f source.* clip*.mp4 segments.json
+        run: rm -f source.* clip*.mp4
