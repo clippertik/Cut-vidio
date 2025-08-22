@@ -1,10 +1,17 @@
-name: YouTube Multi-Cut (HH:MM:SS)
+name: YouTube Multi-Segment Cut (Direct)
 
 on:
   workflow_dispatch:
     inputs:
       url:
         description: "URL YouTube"
+        required: true
+      segments:
+        description: |
+          Daftar waktu mulai-selesai (pisahkan baris baru).
+          Contoh:
+          00:01:00-00:01:30
+          02:00:00-02:00:25
         required: true
       resolution:
         description: "Resolusi maksimal"
@@ -24,14 +31,6 @@ on:
         type: choice
         options: [ "auto", "5M", "10M", "20M" ]
         default: "auto"
-      segments:
-        description: |
-          Daftar segmen (pakai format HH:MM:SS-HH:MM:SS).  
-          Contoh:  
-          00:01:00-00:01:30  
-          02:05:10-02:06:00  
-          02:30:00-02:31:15
-        required: true
 
 jobs:
   cut:
@@ -43,52 +42,42 @@ jobs:
       - name: Install tools
         run: |
           sudo apt update
-          sudo apt install -y ffmpeg
+          sudo apt install -y ffmpeg jq
           pip install yt-dlp
 
       - name: Buat cookies dari Secret
         run: echo "${{ secrets.YT_COOKIES }}" > cookies.txt
 
-      - name: Download video
-        run: |
-          yt-dlp --cookies cookies.txt \
-            -f "bestvideo[height<=${{ github.event.inputs.resolution }}]+bestaudio/best[height<=${{ github.event.inputs.resolution }}]" \
-            -o "source.%(ext)s" \
-            "${{ github.event.inputs.url }}"
-
-      - name: Potong video sesuai segmen
+      - name: Download potongan langsung
         run: |
           if [ "${{ github.event.inputs.fps }}" = "original" ]; then
             FPS_ARG=""
           else
-            FPS_ARG="-r ${{ github.event.inputs.fps }}"
+            FPS_ARG="--postprocessor-args \"-r ${{ github.event.inputs.fps }}\""
           fi
 
           if [ "${{ github.event.inputs.bitrate }}" = "auto" ]; then
             BITRATE_ARG=""
           else
-            BITRATE_ARG="-b:v ${{ github.event.inputs.bitrate }}"
+            BITRATE_ARG="--postprocessor-args \"-b:v ${{ github.event.inputs.bitrate }}\""
           fi
 
           i=1
-          echo "${{ github.event.inputs.segments }}" | while IFS=- read START END; do
-            START=$(echo $START | xargs)
-            END=$(echo $END | xargs)
-            FILENAME=$(printf "%02d_clip.mp4" $i)
-
-            ffmpeg -i source.* -ss $START -to $END \
-              -c:v libx264 -preset fast -crf 23 $FPS_ARG $BITRATE_ARG \
-              -c:a aac -b:a 192k -movflags +faststart \
-              "$FILENAME"
-
+          for SEG in ${{ github.event.inputs.segments }}; do
+            yt-dlp --cookies cookies.txt \
+              -f "bestvideo[height<=${{ github.event.inputs.resolution }}]+bestaudio/best" \
+              --download-sections "*$SEG" \
+              -o "clip${i}.%(ext)s" \
+              $FPS_ARG $BITRATE_ARG \
+              "${{ github.event.inputs.url }}"
             i=$((i+1))
           done
 
       - name: Upload hasil
         uses: actions/upload-artifact@v4
         with:
-          name: youtube-multi-cut
-          path: "*.mp4"
+          name: youtube-clips
+          path: "clip*.*"
 
-      - name: Bersihkan file lama
-        run: rm -f source.* clip*.mp4
+      - name: Bersihkan file
+        run: rm -f clip*.mp4
