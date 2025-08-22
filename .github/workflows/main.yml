@@ -1,4 +1,4 @@
-name: YouTube Multi-Cut (Direct Segments)
+name: YouTube Multi-Cut MP4 (H.264)
 
 on:
   workflow_dispatch:
@@ -7,7 +7,7 @@ on:
         description: "URL YouTube"
         required: true
       segments:
-        description: "Daftar segmen (format: 00:00:10-00:00:30, dipisah baris)"
+        description: "Daftar segmen, contoh: 00:02:00-00:02:25 00:05:00-00:05:45"
         required: true
       resolution:
         description: "Resolusi maksimal"
@@ -44,36 +44,43 @@ jobs:
       - name: Buat cookies dari Secret
         run: echo "${{ secrets.YT_COOKIES }}" > cookies.txt
 
-      - name: Download potongan langsung
+      - name: Download & Cut langsung ke MP4
         run: |
           if [ "${{ github.event.inputs.fps }}" = "original" ]; then
             FPS_ARG=""
           else
-            FPS_ARG="--postprocessor-args ffmpeg:-r:${{ github.event.inputs.fps }}"
+            FPS_ARG="-r ${{ github.event.inputs.fps }}"
           fi
 
           if [ "${{ github.event.inputs.bitrate }}" = "auto" ]; then
             BITRATE_ARG=""
           else
-            BITRATE_ARG="--postprocessor-args ffmpeg:-b:v:${{ github.event.inputs.bitrate }}"
+            BITRATE_ARG="-b:v ${{ github.event.inputs.bitrate }}"
           fi
 
           i=1
-          while read SEG; do
+          for SEG in ${{ github.event.inputs.segments }}; do
+            echo "🎬 Potong segmen $SEG ..."
             yt-dlp --cookies cookies.txt \
-              -f "bestvideo[height<=${{ github.event.inputs.resolution }}]+bestaudio/best" \
+              -f "bestvideo[height<=${{ github.event.inputs.resolution }}]+bestaudio/best[height<=${{ github.event.inputs.resolution }}]" \
               --download-sections "*$SEG" \
-              -o "clip${i}.%(ext)s" \
-              $FPS_ARG $BITRATE_ARG \
+              -o "raw${i}.%(ext)s" \
               "${{ github.event.inputs.url }}"
+
+            ffmpeg -y -i raw${i}.* -c:v libx264 -preset fast -crf 23 \
+              $FPS_ARG $BITRATE_ARG \
+              -c:a aac -b:a 192k -movflags +faststart \
+              "clip${i}.mp4"
+
+            rm -f raw${i}.*
             i=$((i+1))
-          done <<< "${{ github.event.inputs.segments }}"
+          done
 
       - name: Upload hasil
         uses: actions/upload-artifact@v4
         with:
           name: youtube-multi-cut
-          path: "clip*"
+          path: "*.mp4"
 
       - name: Bersihkan file lama
-        run: rm -f clip* cookies.txt
+        run: rm -f raw*.* clip*.mp4
