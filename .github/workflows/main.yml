@@ -1,4 +1,4 @@
-name: YouTube Multi-Cut MP4 (H.264)
+name: YouTube Multi-Cut (Safe H264)
 
 on:
   workflow_dispatch:
@@ -7,7 +7,7 @@ on:
         description: "URL YouTube"
         required: true
       segments:
-        description: "Daftar segmen, contoh: 00:02:00-00:02:25 00:05:00-00:05:45"
+        description: "Segmen waktu (contoh: 01:14:00-01:14:23 02:00:00-02:00:25)"
         required: true
       resolution:
         description: "Resolusi maksimal"
@@ -44,35 +44,38 @@ jobs:
       - name: Buat cookies dari Secret
         run: echo "${{ secrets.YT_COOKIES }}" > cookies.txt
 
-      - name: Download & Cut langsung ke MP4
+      - name: Potong video langsung dari YouTube
         run: |
           if [ "${{ github.event.inputs.fps }}" = "original" ]; then
             FPS_ARG=""
           else
-            FPS_ARG="-r ${{ github.event.inputs.fps }}"
+            FPS_ARG="--postprocessor-args \"-r ${{ github.event.inputs.fps }}\""
           fi
 
           if [ "${{ github.event.inputs.bitrate }}" = "auto" ]; then
             BITRATE_ARG=""
           else
-            BITRATE_ARG="-b:v ${{ github.event.inputs.bitrate }}"
+            BITRATE_ARG="--postprocessor-args \"-b:v ${{ github.event.inputs.bitrate }}\""
           fi
 
           i=1
           for SEG in ${{ github.event.inputs.segments }}; do
             echo "🎬 Potong segmen $SEG ..."
+
             yt-dlp --cookies cookies.txt \
-              -f "bestvideo[height<=${{ github.event.inputs.resolution }}]+bestaudio/best[height<=${{ github.event.inputs.resolution }}]" \
+              -f "bv*[vcodec^=avc1][height<=${{ github.event.inputs.resolution }}]+ba/b[height<=${{ github.event.inputs.resolution }}]" \
               --download-sections "*$SEG" \
-              -o "raw${i}.%(ext)s" \
-              "${{ github.event.inputs.url }}"
+              --merge-output-format mp4 \
+              -o "clip${i}.%(ext)s" \
+              "${{ github.event.inputs.url }}" || true
 
-            ffmpeg -y -i raw${i}.* -c:v libx264 -preset fast -crf 23 \
-              $FPS_ARG $BITRATE_ARG \
-              -c:a aac -b:a 192k -movflags +faststart \
-              "clip${i}.mp4"
+            # kalau hasil bukan mp4 → re-encode ke mp4 (H264 + AAC)
+            if [ -f "clip${i}.webm" ]; then
+              echo "⚡ Convert clip${i}.webm ke MP4..."
+              ffmpeg -i "clip${i}.webm" -c:v libx264 -preset fast -crf 23 -c:a aac "clip${i}.mp4"
+              rm -f "clip${i}.webm"
+            fi
 
-            rm -f raw${i}.*
             i=$((i+1))
           done
 
@@ -83,4 +86,4 @@ jobs:
           path: "*.mp4"
 
       - name: Bersihkan file lama
-        run: rm -f raw*.* clip*.mp4
+        run: rm -f source.* clip*.webm
