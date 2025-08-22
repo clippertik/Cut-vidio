@@ -1,13 +1,10 @@
-name: YouTube Multi-Cut (Gemini + Cookies)
+name: YouTube Multi-Cut (Manual Segments)
 
 on:
   workflow_dispatch:
     inputs:
       url:
         description: "URL YouTube"
-        required: true
-      gemini_api:
-        description: "API Key Gemini (berlaku 1 jam)"
         required: true
       resolution:
         description: "Resolusi maksimal"
@@ -27,6 +24,15 @@ on:
         type: choice
         options: [ "auto", "5M", "10M", "20M" ]
         default: "auto"
+      segments:
+        description: |
+          Segmen waktu dalam format JSON.  
+          Contoh:  
+          [
+            {"start":"00:01:00","end":"00:01:30","title":"momen_lucu"},
+            {"start":"00:05:10","end":"00:05:40","title":"marah"}
+          ]
+        required: true
 
 jobs:
   cut:
@@ -51,22 +57,10 @@ jobs:
             -o "source.%(ext)s" \
             "${{ github.event.inputs.url }}"
 
-      - name: Cari segmen otomatis via Gemini
+      - name: Potong video sesuai segmen
         run: |
-          PROMPT="Anda adalah clipper. Temukan 10 momen donate lucu, marah, seru, senang, nasehat, memberikan ilmu yang berpotensi viral di media sosial. Berikan detail waktu mulai dan akhir, judul, serta alasannya untuk waktu minimal 15 detik dan maksimal 1 menit. Format output JSON: [{\"start\":\"00:01:00\",\"end\":\"00:01:30\",\"title\":\"judul_momen\"}, ...]"
+          echo '${{ github.event.inputs.segments }}' | jq '.' > segments.json
 
-          RESP=$(curl -s -X POST "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key=${{ github.event.inputs.gemini_api }}" \
-            -H "Content-Type: application/json" \
-            -d "{
-              \"contents\":[{\"parts\":[{\"text\":\"$PROMPT\"}]}]
-            }")
-
-          echo "$RESP" | jq -r '..|.text? // empty' > segments.json
-          echo "=== Segmen Gemini ==="
-          cat segments.json
-
-      - name: Multiple Cut dengan ffmpeg
-        run: |
           if [ "${{ github.event.inputs.fps }}" = "original" ]; then
             FPS_ARG=""
           else
