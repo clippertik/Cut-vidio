@@ -33,47 +33,108 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repo
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
 
       - name: Install tools
+        shell: bash
         run: |
-          sudo apt update
-          sudo apt install -y ffmpeg jq
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg jq
+          python -m pip install --upgrade pip
           pip install yt-dlp
 
-      - name: Buat cookies dari Secret
-        run: echo "${{ secrets.YT_COOKIES }}" > cookies.txt
+      # OPSIONAL: jika secret cookies kamu disimpan dalam bentuk BASE64
+      # - name: Buat cookies dari Secret (BASE64)
+      #   if: ${{ secrets.YT_COOKIES_B64 != '' }}
+      #   run: |
+      #     set -euo pipefail
+      #     echo "${{ secrets.YT_COOKIES_B64 }}" | base64 -d > cookies.txt
+
+      - name: Buat cookies dari Secret (plain text)
+        if: ${{ secrets.YT_COOKIES != '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf "%s" "${{ secrets.YT_COOKIES }}" > cookies.txt
 
       - name: Potong video langsung dari YouTube
+        shell: bash
         run: |
-          if [ "${{ github.event.inputs.fps }}" = "original" ]; then
-            FPS_ARG=""
-          else
-            FPS_ARG="--postprocessor-args \"-r ${{ github.event.inputs.fps }}\""
+          set -euo pipefail
+
+          # Bangun argumen post-processor ffmpeg untuk Video (fps/bitrate)
+          POST_ARGS_VIDEO=""
+          if [ "${{ github.event.inputs.fps }}" != "original" ]; then
+            POST_ARGS_VIDEO="${POST_ARGS_VIDEO} -r ${{ github.event.inputs.fps }}"
+          fi
+          if [ "${{ github.event.inputs.bitrate }}" != "auto" ]; then
+            POST_ARGS_VIDEO="${POST_ARGS_VIDEO} -b:v ${{ github.event.inputs.bitrate }}"
           fi
 
-          if [ "${{ github.event.inputs.bitrate }}" = "auto" ]; then
-            BITRATE_ARG=""
+          # Jika ada argumen video, bungkus untuk yt-dlp
+          if [ -n "$POST_ARGS_VIDEO" ]; then
+            PP_ARGS=( --postprocessor-args "Video:${POST_ARGS_VIDEO}" )
           else
-            BITRATE_ARG="--postprocessor-args \"-b:v ${{ github.event.inputs.bitrate }}\""
+            PP_ARGS=()
+          fi
+
+          # Gunakan cookies jika ada
+          COOKIE_ARGS=()
+          if [ -f cookies.txt ]; then
+            COOKIE_ARGS=( --cookies cookies.txt )
           fi
 
           i=1
           for SEG in ${{ github.event.inputs.segments }}; do
             echo "🎬 Potong segmen $SEG ..."
 
-            yt-dlp --cookies cookies.txt \
+            # 1) Coba download H.264 hingga resolusi target dan remux ke MP4 (tanpa re-encode bila mungkin)
+            #    - Jika video/audio terpisah, yt-dlp akan merge via ffmpeg
+            #    - Jika codec sudah H.264/AAC, ini cepat. Kalau tidak, kita tangani di langkah 2)
+            yt-dlp \
+              "${COOKIE_ARGS[@]}" \
               -f "bv*[vcodec^=avc1][height<=${{ github.event.inputs.resolution }}]+ba/b[height<=${{ github.event.inputs.resolution }}]" \
-              --download-sections "*$SEG" \
-              --merge-output-format mp4 \
+              --download-sections "*${SEG}" \
+              --remux-video mp4 \
               -o "clip${i}.%(ext)s" \
-              "${{ github.event.inputs.url }}" || true
+              "${PP_ARGS[@]}" \
+              "${{ github.event.inputs.url }}"
 
-            # kalau hasil bukan mp4 → re-encode ke mp4 (H264 + AAC)
-            if [ -f "clip${i}.webm" ]; then
-              echo "⚡ Convert clip${i}.webm ke MP4..."
-              ffmpeg -i "clip${i}.webm" -c:v libx264 -preset fast -crf 23 -c:a aac "clip${i}.mp4"
-              rm -f "clip${i}.webm"
+            # 2) Pastikan output MP4; jika bukan mp4 (atau butuh enforce fps/bitrate), re-encode
+            #    Catatan: kadang remux menghasilkan mp4 tapi fps/bitrate tidak diterapkan.
+            #    Kita cek dan paksa re-encode hanya bila perlu.
+            OUTFILE="clip${i}.mp4"
+            if [ ! -f "$OUTFILE" ]; then
+              # Cari file lain (mis. .webm) dan konversi
+              CAND=$(ls -1 clip${i}.* 2>/dev/null | head -n1 || true)
+              if [ -n "$CAND" ] && [ "$CAND" != "$OUTFILE" ]; then
+                echo "⚡ Convert $CAND -> $OUTFILE (H.264 + AAC)"
+                ffmpeg -y -i "$CAND" \
+                  -c:v libx264 -preset fast -crf 18 \
+                  $( [ "${{ github.event.inputs.fps }}" != "original" ] && printf -- "-r %s" "${{ github.event.inputs.fps }}" ) \
+                  $( [ "${{ github.event.inputs.bitrate }}" != "auto" ] && printf -- "-b:v %s" "${{ github.event.inputs.bitrate }}" ) \
+                  -c:a aac -b:a 192k \
+                  "$OUTFILE"
+                rm -f "$CAND"
+              fi
+            else
+              # Jika pengguna minta fps/bitrate spesifik, pastikan diterapkan (re-mux tidak mengubah fps/bitrate)
+              if [ "${{ github.event.inputs.fps }}" != "original" ] || [ "${{ github.event.inputs.bitrate }}" != "auto" ]; then
+                echo "⚡ Enforce FPS/Bitrate -> re-encode $OUTFILE"
+                ffmpeg -y -i "$OUTFILE" \
+                  -c:v libx264 -preset fast -crf 18 \
+                  $( [ "${{ github.event.inputs.fps }}" != "original" ] && printf -- "-r %s" "${{ github.event.inputs.fps }}" ) \
+                  $( [ "${{ github.event.inputs.bitrate }}" != "auto" ] && printf -- "-b:v %s" "${{ github.event.inputs.bitrate }}" ) \
+                  -c:a aac -b:a 192k \
+                  "clip${i}.tmp.mp4"
+                mv "clip${i}.tmp.mp4" "$OUTFILE"
+              fi
             fi
 
             i=$((i+1))
@@ -86,4 +147,6 @@ jobs:
           path: "*.mp4"
 
       - name: Bersihkan file lama
-        run: rm -f source.* clip*.webm
+        shell: bash
+        run: |
+          rm -f cookies.txt clip*.webm clip*.mkv clip*.m4a clip*.mp3 source.* || true
